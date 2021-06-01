@@ -1,0 +1,398 @@
+---
+title: "Cars Selling Price : Selling Price Prediction for Used Cars using Cardekho.com dataset"
+author: "Arun Kataria"
+date: "5/31/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r prep, include=FALSE}
+##########################################################
+# Create edx set, validation set (final hold-out test set)
+##########################################################
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(rpart)) install.packages("rpart")
+if(!require(rpart.plot)) install.packages("rpart.plot")
+
+# installs tinytex needed to Knit pdf files
+tinytex::install_tinytex(force = FALSE)
+
+library(tidyverse)
+library(caret)
+library(data.table)
+
+library(rpart)
+library(rpart.plot)
+
+# Cardekho used car dataset:
+# The dataset resides at kaggle and can be downloaded using following link
+# https://www.kaggle.com/saisaathvik/used-cars-dataset-from-cardekhocom/download
+# However to simplify, i have uploaded the csv file to google drive and is open
+# and accessible to all, can be downloaded by R using the following link
+# https://drive.google.com/u/0/uc?id=1KlGCf0r2E56WhCqzJ-9_v5KOzPn3T6UJ&export=download
+
+
+# Temp file location
+dl <- tempfile()
+# Download the dataset file from google drive/ open access to all
+download.file("https://drive.google.com/u/0/uc?id=1KlGCf0r2E56WhCqzJ-9_v5KOzPn3T6UJ&export=download", dl)
+
+# read the contents of file from temp location and populate to dataframe src
+src <- fread(text = gsub("::", ",", readLines(dl)))
+
+# view the contents of the dataset
+src
+
+# Check to see path of temporary file location where the file is downloaded
+dl
+
+# glance at the columns that the file has
+names(src)
+
+# next level take a look at the 1st,2nd, 3rd, max quartiles of measures data and groups of attributes
+# summary(src)
+
+# filter outlier that have a huge selling price, very very far from the mean/median
+src<-src %>% filter(is.na(selling_price)==FALSE & selling_price<10000000)
+
+
+# correct the data in min cost price , create col mcp that holds correct values of min cost price
+# the data in min_cost_price column is wrong for cars with range as XXLakh to X crore
+# eg for a car with range 70L to 1.1 Crore the min_cost_price was 700,000,000 to 11,000,000
+# the min cost price was wrongly calculated with additional 2 zeros for such cases, hence correcting data
+# the latest min cost price is stored in mcp column
+src<-src %>% mutate(mcp=case_when (min_cost_price>100000000 ~ min_cost_price/100 , TRUE ~ min_cost_price))
+
+# filter out incomplete data rows, lots of missing data, hence need to cleanup before we use it
+src<-src %>%  filter(is.na(min_cost_price)==FALSE & is.na(vehicle_age)==FALSE &
+                         is.na(engine)==FALSE & is.na(km_driven)==FALSE & is.na(transmission_type)==FALSE)
+
+# plot km_driven, we can see outliers
+plot(src$km_driven)
+
+# plot vehicle_age, we can see outliers
+plot(src$vehicle_age)
+
+# filter out the outlier in terms of km_driven, looks like error records of km_driven more than 1Million km :)
+src<- src %>% filter(km_driven<600000)
+
+# filter outliers in terms of vehicle age, considering the scrappage policy, cannot drive more than 20yrs old
+src<- src %>% filter(vehicle_age<=20)
+
+
+# take a look at data again
+src %>% arrange(desc(km_driven)) %>% head(10) %>% select(km_driven)
+src %>% arrange(desc(vehicle_age))
+
+# a glance at summary again to see if the max, min and quartile values looks reliable
+summary(src)
+
+
+# set seed to 1
+set.seed(1,sample.kind = NULL)
+
+# partitioning the dataset src into train and test datasets, 20% into testing
+index<-createDataPartition(src$selling_price,times = 1,p=0.2,list = FALSE)
+
+# populate train_set and test_set: train_set=~80% of src, test_set=~20% of src
+train_set<-src[-index,]
+test_set<-src[index,]
+
+# check row counts to see its per expectations 80/20 split
+NROW(train_set)
+NROW(test_set)
+
+
+# normalize the cost price range from min to max - using avg of min & max cost price
+train_set<- train_set %>% mutate(avg_cost_price=(mcp+max_cost_price)/2)
+test_set<- test_set %>% mutate(avg_cost_price=(mcp+max_cost_price)/2)
+
+
+
+# defining the RMSE value function to calculate the RMSE values for various models
+RMSE <- function(true_value, predicted_val){
+  sqrt(mean((true_value - predicted_val)^2))
+}
+
+
+```
+
+## Introduction : Project
+
+
+
+This is an R Markdown document that contains the code & report to showcase the developments in achieving a statistically usable prediction model that predicts the reasonable selling price of used cars based on various factors like age of car, km driven, cost price of new car, engine power, mileage etc.
+
+The statistical viability of this model and various other models developed during the modeling to predict the selling price is evaluated based on the RMSE (Root Mean Square Error) method. The Goal is to reduce the RMSE as much as i can.
+
+This used car selling price prediction model takes in the dataset from kaggle (cardekho.com dataset)
+The model can easily be used by users to define a reasonable price they can expect for their car. This model can also be used by used car selling site to define a range for the car being sold.
+This range will help regulate the price of car and hence attract the buyers as buyers can now expect a reasonable and consistent price range for cars based on facts instead of just sellers thoughts.
+
+## Method/Analysis :
+
+#### Overview of DataSet (train_set):
+
+The used cars dataset has further been divided into train_set(80%) and test_set(20%) to train and test various models. Hereafter we will be using the train_set for training of models and test_set to test the RMSE of various models.
+
+The train_set dataset contains `r NROW(train_set) ` records.
+
+Following is the structure of the source Dataset `r NROW(train_set)` rows and `r NCOL(train_set)` columns.
+The columns of the dataset available are
+  `r names(train_set)`.
+
+
+The dependent variable or the variable that we are interested to predict here is : **selling price**
+
+The independent variables or the variables that we will be using to predict selling price are:
+- vehicle_age
+- km_driven
+- mileage
+- max_power
+- engine
+- min_cost_price & max_cost_price
+  
+
+#### A Basic exploration of the data in the train_set
+
+```{r prep2, fig.width=4, fig.height=4}
+head(train_set,10)
+
+```
+
+
+Lets start analyzing the data more:
+
+#### Data Analysis & Modeling
+
+**Average Selling Price** = `r mean(train_set$selling_price)`
+
+
+### First Model
+At first we started with the mean selling price across the complete train_set and tested out the RMSE of this simple model.
+
+```{r naive, message=FALSE}
+mu_hat <- mean(train_set$selling_price)
+mu_hat
+
+
+#Validating the RMSE value for simple mean, matching with selling price in test set
+naive_rmse <- RMSE(test_set$selling_price, mu_hat)
+naive_rmse
+
+# A RMSE results table/dataframe created to store RMSEs of various models as we analyze it
+rmse_results <- data_frame(method = "Simple average", RMSE = naive_rmse)
+
+# Print rmse results for simple average - A baseline RMSE
+rmse_results
+
+```
+
+
+
+Lets see if we can improve the RMSE of this model using other independent variables available. 
+We will start using the Machine learning alogrithms that use other independent variables to predict the selling price. Lets start by using the Linear regression model "lm".
+We will use the caret package, train function to train various models in a similar fashion.
+
+### Second Model
+
+```{r lm, message=FALSE}
+
+# Linear regression model to predict the selling price
+fit1<- train(selling_price ~ vehicle_age + avg_cost_price + km_driven + max_power 
+             + mileage, data=train_set, method="lm", na.action = na.omit)
+
+fit1
+
+# check the importance of factors used in model
+varImp(fit1)
+
+# predict the outcome/selling price of cars in test_set using the above model 
+# (linear regression)
+p2<-predict(fit1,newdata=test_set)
+
+# calculate the Root mean square error
+lm_rmse<-RMSE(p2,test_set$selling_price)
+
+# Calculate and plot the residual value, histogram
+test_set<- test_set %>% mutate(p=p2,diff=selling_price-p2)
+test_set %>% arrange(desc(abs(diff))) %>%  select(selling_price, p, diff) %>% head(5)
+test_set %>% ggplot(aes(diff)) + geom_histogram() 
+
+# append/add the RMSE value results to rmse_results dataframe
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Linear regression Model",
+                                     RMSE = lm_rmse ))
+
+# View the RMSE values just added for Linear regression Model
+rmse_results %>% knitr::kable()
+
+```
+
+
+Let us try using other machine learning models and see if we can improve the RMSE values further.
+We will try out with using rpart or decision tree to predict the selling price.
+
+### Third Model
+
+```{r decisionTree, message=FALSE}
+
+# using decision tree - rpart ml algorithm to see if we can get better RMSE values
+fit3<-train(selling_price ~ vehicle_age + engine + avg_cost_price + km_driven 
+            + max_power + mileage, data=train_set, method="rpart", 
+            na.action = na.omit, tuneGrid = data.frame(cp= seq(0, 0.05, 0.002)))
+
+# list down all cp's and corresponding R^2 & RMSE values
+fit3
+
+# final model / best fit from all the predicted ones/ commented as its a long output
+# fit3$finalModel
+
+# prune the tree using cp=0.006, making a little easy to apprehend
+new_tree<-prune(fit3$finalModel,cp=0.006)
+
+# plot the decision tree
+prp(new_tree)
+
+# predict the selling price using about decision tree model and test data set
+p2<-predict(fit3,newdata=test_set)
+
+# Evaluate the Root mean square error values 
+rpart_rmse<-RMSE(p2,test_set$selling_price)
+
+# calculate and plot the residual values in histogram
+test_set<- test_set %>% mutate(p=p2,diff=selling_price-p2)
+test_set %>% arrange(desc(abs(diff))) %>%  select(selling_price, p, diff) %>% head(5)
+test_set %>% ggplot(aes(diff)) + geom_histogram() 
+
+
+
+# Test out the RMSE with the latest predicted selling price 
+# and append these to existing rmse_results dataframe
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Decision Tree Model",  
+                                     RMSE = rpart_rmse ))
+rmse_results %>% knitr::kable()
+
+
+```
+
+This has further improved the RMSE value, the model looks good. 
+
+
+### Fourth Model : Random Forest
+
+Lets proceed further to see if we can use the random forest ensemble algorithm to predict the values better.
+
+```{r randomForest1, message=FALSE, warning=FALSE}
+
+# Let us see if we can use random forest algorithm and further improve the RMSE
+
+# Setting up the control parameters and tuning grid parameter for random forest algo
+# using repeated control validation, with 3 repeats (random)
+control <- trainControl(method="repeatedcv", number=10, repeats=3, search="random")
+
+# setting up mtry / no of attributes to try before split as a sequence from 1 to 10
+tunegrid <- expand.grid(.mtry = (1:5)) 
+
+#train_set2<-head(train_set,100)
+
+# Train the random forest ml algo to predict the selling price of used car in train set
+fit4<-train(selling_price ~ vehicle_age + avg_cost_price + km_driven + max_power +mileage, 
+            data=train_set, method="rf", na.action = na.omit, tuneGrid = tunegrid)
+
+# display the importance of attibutes
+varImp(fit4)
+
+# check to see what mtry value is the best fit and R^2 values
+fit4
+
+# predict the selling price in test data set using above random forest trained model
+p2<-predict(fit4,newdata=test_set)
+
+# calculate the Root Mean square value using test data set/ 
+# comparing predicted selling price with actual selling price
+rf_rmse<-RMSE(p2,test_set$selling_price)
+
+
+# Calculate the residual value and plot the same in histogram
+test_set<- test_set %>% mutate(p=p2,diff=selling_price-p2)
+test_set %>% arrange(desc(abs(diff))) %>%  select(selling_price, p, diff) %>% head(5)
+test_set %>% ggplot(aes(diff)) + geom_histogram() 
+
+
+# Calcuate the RMSE value of predicted selling price
+# and add these to the rmse_results dataframe
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Random Forest Model",  
+                                     RMSE = rf_rmse ))
+rmse_results %>% knitr::kable()
+
+
+```
+
+
+From the above modeling and predictions we are able to see that the factors like average cost price of new vehicle, km driven, max_power, mileage, vehicle age etc have a great impact on the selling price of vehicle.
+An important point to note here is that the brand of vehicle is explicitly not taken into account. we have a tendency to be biased for a particular car maker / brand (based on our liking/previous experience) but instead it is tried here to predict the selling price just based on the vital statistics of the automobile rather than brand name.
+
+
+
+## Result
+
+Displaying below the final list of models that we tried and also the minimum RMSE values that we achieved using these models.
+
+```{r Result, message=FALSE}
+# Display the final RMSE of the Model
+rmse_results %>% knitr::kable()
+
+```
+
+
+## Below is the Final model that is created using vehicle_age + avg_cost_price + km_driven + max_power + mileage
+
+The final model is tested out using the test data set and it performs well in predicting selling price.
+
+```{r FinalModel, message=FALSE}
+###########################
+# Final Model : Random Forest Model #
+
+Final_Validation_rmse<-rf_rmse
+Final_Validation_rmse
+
+```
+
+
+The Final RMSE using the Validation dataset is `r Final_Validation_rmse`
+
+
+
+## Conclusion
+
+Here in this project we have learned that with just the tangible few parameters we are able to predict the selling price of used cars. Various models perform differently for different type of problem. The choice of best model depends upon various factors like in this case the data can be transformed into a classification problem (buckets of selling price range) or linear regression problem (continuous). 
+Here we have seen that random forest model works the best for this dataset as the RMSE value, the evaluating criteria is best in this case for random forest. A great piece of learning, on how to use and evaluate different Machine Learning algorithms.
+
+The final RMSE score for this model using validation set is : `r Final_Validation_rmse`
+
+
+### Scope of future enhancements :
+There is still a good scope in improving the overall predicted selling price / overall RMSE of the model. 
+
+From a users perspective more parameters can be rearched upon and fetched like location, history of insurance, no of owners, no of services, paint color, etc . These parameters can definitely help in improving the RMSE of the model.
+Although the volume of dataset is not huge, still it takes a good 3+ hours to run on laptop draining almost all of resources. The hardware limitations also restricts from trying out various different things and in turn hinders the tuning efforts.
+
+Another major improvement can be availability of actual price at which the car is sold instead of listed selling price (or seller asking price). Incase the actual sold price is available it can help tune the model further as it will direct/suggest users that per the model their cars actual selling price is x instead of their asking price.
+
+
+
+Thank You.
+Arun
+
+
